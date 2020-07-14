@@ -1,10 +1,6 @@
 import binascii
 import socket
-
-def format_hex(hex):
-    octets = [hex[i:i+2] for i in range(0, len(hex), 2)]
-    pairs = [" ".join(octets[i:i+2]) for i in range(0, len(octets), 2)]
-    return "\n".join(pairs)
+from bs4 import BeautifulSoup
 
 def dns_error_parser(code):
     message = "DNS Error : "
@@ -30,9 +26,39 @@ def dns_error_parser(code):
 
     return message
 
+# Retourne les headers et le contenu parsé
+def receive_data(socket):
+    data = socket.recv(2048)
+
+    headers, _, body = data.partition(b'\r\n\r\n')
+    headers = headers.decode('latin1')
+
+    # Trouver la taille de contenu
+    content_length = 0
+    for header in headers.split("\r\n"):
+        if "Content-Length" in header:
+            content_length = int(header.split(":")[1][1:])
+
+    chunks = []
+    bytes_recd = 2048
+    while bytes_recd < content_length:
+        chunk = socket.recv(min(content_length - bytes_recd, 2048))
+        if chunk == b'':
+            raise RuntimeError("socket connection broken")
+        chunks.append(chunk)
+        bytes_recd = bytes_recd + len(chunk)
+
+
+    data += b''.join(chunks)
+
+    return data
 
 website = input("Entrez l'adresse du site : ")
-#website = "google.com"
+#website = apache.org
+
+print("=================================================================")
+print("DNS REQUEST")
+print("=================================================================")
 
 # Construction du header du message DNS
 message = "AA AA 01 00 00 01 00 00 00 00 00 00"
@@ -60,6 +86,7 @@ message = message.replace(" ", "").replace("\n", "")
 # Envoyer le message UDP à 127.0.0.53:53
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+print("Sending DNS message to 8.8.8.8:53\n")
 sock.sendto(binascii.unhexlify(message), ("8.8.8.8", 53))
 data, _ = sock.recvfrom(4096)
 
@@ -68,24 +95,77 @@ data = data.hex()
 
 sock.close() 
 
-# Parser la réponse
-response_header = data[4:8]
+# Parser la section header
+response_header = data[0:24]
+
+# Parser la section question
+name_length = int(data[24:26], 16)
+domain_length = int(data[24 + 2*name_length + 2: 24 + 2*name_length + 4], 16)
+end_of_question = 26 + 2*name_length + 2*domain_length + 12
+question_section = data[24: end_of_question]
+
+# Parser la section 
+answer_section = data[end_of_question:]
 
 # Vérification des erreurs.
-if response_header[3] != '0':
-    print(dns_error_parser(response_header[3]))
-    # TODO - Trouver erreur
+if response_header[7] != '0':
+    print(dns_error_parser(response_header[7]))
     exit()
 
-print("RCODE : 0 - DNS Query completed succesfully.")
-
-ip_address_length = int(data[76:80], 16)
+print("RCODE : 0 - DNS Query completed succesfully.\n")
 
 # Trouver et parser l'adresse IP
-ip_address_hex = data[(-2) * ip_address_length:]
+ip_address_hex = answer_section[-8:]
 ip_address = ""
 for i in range(0, len(ip_address_hex), 2):
     ip_address += str(int(ip_address_hex[i] + ip_address_hex[i+1], 16)) + "."
 ip_address = ip_address[:-1] 
 
-print(ip_address)
+print("Address IP is : " + ip_address + "\n")
+
+# Se connecter en TCP au serveur web
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((ip_address, 80))
+
+# Envoyer la requête HTTP au serveur web
+http_message = b"GET / HTTP/1.1\r\nHost: "+ bytes(website, 'utf-8') + b"\r\nConnection: keep-alive\r\nUser-agent: Mozilla/4.0\r\nAccept: text/html, image/gif, image/jpeg, image/tiff\r\n\r\n"
+sock.sendall(http_message)
+
+data = receive_data(sock)
+
+headers, _, body = data.partition(b'\r\n\r\n')
+headers = headers.decode('latin1')
+
+print("=================================================================")
+print("HTTP REQUEST")
+print("=================================================================")
+print("Web server response :\n")
+print("Status : " + headers.split("\r\n")[0] + "\n")
+
+print("Headers : ")
+print("\r\n".join(headers.split("\r\n")[1:]) + "\n")
+
+print("Content : ")
+print(body)
+
+# Télécharger les images (si présentes)
+soup = BeautifulSoup(body, 'html.parser')
+img_tags = soup.find_all('img')
+
+urls = [img['src'] for img in img_tags]
+
+if len(urls) == 0:
+    exit()
+
+# TODO - Fix le fait que certain fichier jpg ne marche pas sur apache.org
+for index, url in enumerate(urls):
+    if url[-3:] == "jpg" or url[-3:] == "gif":
+        if url[0] != "/":
+            url = "/" + url
+        http_message = b"GET " + bytes(url, "utf-8") + b" HTTP/1.1\r\nHost: " + bytes(website, 'utf-8') + b"\r\nConnection: keep-alive\r\nUser-agent: Mozilla/4.0\r\nAccept: image/gif, image/jpeg, image/tiff\r\n\r\n"
+        sock.sendall(http_message)
+        data = receive_data(sock)
+        _, _, body = data.partition(b'\r\n\r\n')
+        f = open(str(index) + "." + url[-3:], 'wb')
+        f.write(body)
+        f.close()
