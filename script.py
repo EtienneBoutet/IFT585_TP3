@@ -27,34 +27,40 @@ def dns_error_parser(code):
     return message
 
 # Retourne les headers et le contenu parsé
-def receive_data(socket):
-    data = socket.recv(2048)
-
-    headers, _, body = data.partition(b'\r\n\r\n')
-    headers = headers.decode('latin1')
+def send_and_receive(sock, website, path="/"):
+    http_message = b"HEAD /" + bytes(path, 'utf-8') + b" HTTP/1.1\r\nHost: "+ bytes(website, 'utf-8') + b"\r\nConnection: keep-alive\r\nUser-agent: Mozilla/4.0\r\nAccept: text/html, image/gif, image/jpeg, image/tiff\r\n\r\n"
+    
+    sock.sendall(http_message)
+    
+    head = sock.recv(20000)
 
     # Trouver la taille de contenu
     content_length = 0
-    for header in headers.split("\r\n"):
-        if "Content-Length" in header:
-            content_length = int(header.split(":")[1][1:])
+    for header in head.split(b"\r\n"):
+        if b"Content-Length" in header:
+            content_length = int(header.split(b":")[1][1:])
+
+    http_message = b"GET " + bytes(path, 'utf-8') + b" HTTP/1.1\r\nHost: "+ bytes(website, 'utf-8') + b"\r\nConnection: keep-alive\r\nUser-agent: Mozilla/4.0\r\nAccept: text/html, image/gif, image/jpeg, image/tiff\r\n\r\n"
+    sock.sendall(http_message)
+
+    data = b""
 
     chunks = []
-    bytes_recd = 2048
+    bytes_recd = 0
     while bytes_recd < content_length:
-        chunk = socket.recv(min(content_length - bytes_recd, 2048))
+        chunk = sock.recv(min(content_length - bytes_recd, 2048))
         if chunk == b'':
             raise RuntimeError("socket connection broken")
         chunks.append(chunk)
         bytes_recd = bytes_recd + len(chunk)
 
+    chunks.append(sock.recv(2048))
 
     data += b''.join(chunks)
 
     return data
 
 website = input("Entrez l'adresse du site : ")
-#website = apache.org
 
 print("=================================================================")
 print("DNS REQUEST")
@@ -128,10 +134,7 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect((ip_address, 80))
 
 # Envoyer la requête HTTP au serveur web
-http_message = b"GET / HTTP/1.1\r\nHost: "+ bytes(website, 'utf-8') + b"\r\nConnection: keep-alive\r\nUser-agent: Mozilla/4.0\r\nAccept: text/html, image/gif, image/jpeg, image/tiff\r\n\r\n"
-sock.sendall(http_message)
-
-data = receive_data(sock)
+data = send_and_receive(sock, website)
 
 headers, _, body = data.partition(b'\r\n\r\n')
 headers = headers.decode('latin1')
@@ -145,6 +148,8 @@ print("Status : " + headers.split("\r\n")[0] + "\n")
 print("Headers : ")
 print("\r\n".join(headers.split("\r\n")[1:]) + "\n")
 
+input()
+
 print("Content : ")
 print(body)
 
@@ -157,14 +162,12 @@ urls = [img['src'] for img in img_tags]
 if len(urls) == 0:
     exit()
 
-# TODO - Fix le fait que certain fichier jpg ne marche pas sur apache.org
+
 for index, url in enumerate(urls):
     if url[-3:] == "jpg" or url[-3:] == "gif":
         if url[0] != "/":
             url = "/" + url
-        http_message = b"GET " + bytes(url, "utf-8") + b" HTTP/1.1\r\nHost: " + bytes(website, 'utf-8') + b"\r\nConnection: keep-alive\r\nUser-agent: Mozilla/4.0\r\nAccept: image/gif, image/jpeg, image/tiff\r\n\r\n"
-        sock.sendall(http_message)
-        data = receive_data(sock)
+        data = send_and_receive(sock, website, url)
         _, _, body = data.partition(b'\r\n\r\n')
         f = open(str(index) + "." + url[-3:], 'wb')
         f.write(body)
